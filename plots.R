@@ -30,23 +30,34 @@ summary(glm_nreg_epa)
 
 calculate_and_plot_three_planes <- function(model, data) { 
   # Define the three levels of log_epa
-  log_KDE_levels <- quantile(data$log_KDE, probs = c(0.5, 0.75, 1), na.rm = TRUE)
-  names(log_KDE_levels) <- c("Low", "Medium", "High")
+  log_KDE_levels <- quantile(data$log_KDE, probs = c(0.5, 0.7, 0.9), na.rm = TRUE)
   
-  # Create grid of dist_water and dist_veg
-  dist_water_seq <- seq(min(data$dist_water, na.rm = TRUE), max(data$dist_water, na.rm = TRUE), length.out = 100)
-  dist_veg_seq <- seq(min(data$dist_veg, na.rm = TRUE), max(data$dist_veg, na.rm = TRUE), length.out = 100)
+  p50 <- log_epa_levels[[1]]
+  p70 <- log_epa_levels[[2]]
+  p90 <- log_epa_levels[[3]]
   
-  # Create base grid
+  # Step 2: Classify each point into a category
+  data$accum_cat <- cut(data$log_epa,
+                        breaks = c(-Inf, p50, p70, p90, Inf),
+                        labels = c("Low", "Medium", "High", "Hotspot"),
+                        include.lowest = TRUE)
+   
+  mean_log_epa <- tapply(data$log_epa, data$accum_cat, mean, na.rm = TRUE)
+  
+  # Create grid of predictors
+  dist_water_seq <- seq(min(data$dist_water, na.rm = TRUE),
+                        max(data$dist_water, na.rm = TRUE), length.out = 100)
+  dist_veg_seq <- seq(min(data$dist_veg, na.rm = TRUE),
+                      max(data$dist_veg, na.rm = TRUE), length.out = 100)
   base_grid <- expand.grid(dist_water = dist_water_seq, dist_veg = dist_veg_seq)
   
   # Start plotly figure
   fig <- plot_ly()
   
   # Loop through log_epa levels and add surfaces
-  for (level in names(log_KDE_levels)) {
+  for (cat in names(mean_log_epa)) {
     new_data <- base_grid %>%
-      mutate(log_epa = log_KDE_levels[[level]])
+      mutate(log_epa = mean_log_epa[[cat]])
     
     # Predict
     preds <- predict(model, newdata = new_data, type = "response")
@@ -58,16 +69,17 @@ calculate_and_plot_three_planes <- function(model, data) {
                        ncol = length(dist_veg_seq))
     
     # Add surface to plot
-    fig <- fig %>% add_surface(
+     fig <- fig %>% add_surface(
       x = dist_veg_seq,
       y = dist_water_seq,
       z = z_matrix,
       showscale = FALSE,
-      name = paste("log_KDE:", level),
-      colorscale = switch(level,
+      name = cat,
+      colorscale = switch(cat,
                           "Low" = list(c(0, '#1b9e77'), c(1, '#1b9e77')),
                           "Medium" = list(c(0, '#d95f02'), c(1, '#d95f02')),
-                          "High" = list(c(0, '#7570b3'), c(1, '#7570b3')))
+                          "High" = list(c(0, '#7570b3'), c(1, '#7570b3')),
+                          "Hotspot" = list(c(0, '#2d004b'), c(1, '#2d004b)))
     )
   }
   
@@ -93,36 +105,53 @@ htmlwidgets::saveWidget(overall_plot, "3D_PLOT.html")
 
 plot_static_all_beaches_probability <- function(model, data) {
   # Create prediction grid for all beaches combined
-  log_KDE_levels <- quantile(data$log_KDE, probs = c(0.5, 0.75, 1), na.rm = TRUE)
-  names(log_KDE_levels) <- c("Low", "Medium", "High")
+  log_epa_levels <- quantile(data$log_epa, probs = c(0.5, 0.7, 0.9), na.rm = TRUE)
   
+  p50 <- log_epa_levels[[1]]
+  p70 <- log_epa_levels[[2]]
+  p90 <- log_epa_levels[[3]]
+
+  data$accum_cat <- cut(data$log_epa,
+    breaks = c(-Inf, p50, p70, p90, Inf),
+    labels = c("Low (<50%)", "Medium (50–70%)", "High (70–90%)", "Hotspot (>90%)"),
+    include.lowest = TRUE)
+
+  log_epa_means <- data %>%
+    group_by(accum_cat) %>%
+    summarize(log_epa = mean(log_epa, na.rm = TRUE)) %>%
+    na.omit()
+
   # Create prediction grid for all combinations of distance to water, vegetation, and log_epa
-  new_data_all <- expand.grid(
-    dist_water = seq(min(data$dist_water), max(data$dist_water), length.out = 100),
-    dist_veg = seq(min(data$dist_veg), max(data$dist_veg), length.out = 100),
-    log_KDE = log_KDE_levels
-  )
+  dist_water_seq <- seq(min(data$dist_water), max(data$dist_water), length.out = 100)
+  dist_veg_seq <- seq(min(data$dist_veg), max(data$dist_veg), length.out = 100)
   
-  # Predict probabilities for all combinations of variables
-  predictions_all <- predict(model, newdata = new_data_all, type = "response")
-  plot_data_all <- cbind(new_data_all, predicted_probability = predictions_all)
-  
+  plot_data_all <- do.call(rbind, lapply(1:nrow(log_epa_means), function(i) {
+    level <- log_epa_means$accum_cat[i]
+    value <- log_epa_means$log_epa[i]
+    
+    new_grid <- expand.grid(
+      dist_water = dist_water_seq,
+      dist_veg = dist_veg_seq
+    ) %>%
+      mutate(log_epa = value, accum_cat = level)
+    
+    preds <- predict(model, newdata = new_grid, type = "response")
+    new_grid$predicted_probability <- preds
+    return(new_grid)
+  }))
+
   # Plot
-  ggplot(plot_data_all, aes(x = dist_water, y = dist_veg, fill = predicted_probability)) +
+    ggplot(plot_data_all, aes(x = dist_water, y = dist_veg, fill = predicted_probability)) +
     geom_tile() +
-    facet_wrap(~ log_KDE, labeller = label_bquote(log_KDE == .(log_KDE))) +
-    scale_fill_gradientn(
-      colors = my_color_ramp(100),   # Generate 100 interpolated colors
-      name = "Predicted\nProbability",
-      limits = c(0, 1),              # Ensures scale goes from 0 to 1
-      oob = scales::squish           # Prevents out-of-bounds values from throwing errors
-    ) +
+    facet_wrap(~ accum_cat, nrow = 1) +  # <-- This makes 4 plots in one row
+    scale_fill_viridis_c(name = "Predicted\nProbability") +
     labs(
-      title = "Predicted Nesting Probability Across All Beaches",
+      title = "Predicted Nesting Probability by Accumulation Range",
       x = "Distance to Water",
       y = "Distance to Vegetation"
     ) +
     theme_minimal()
+  
 }
 
 plot_static_all_beaches_probability(model, data)
